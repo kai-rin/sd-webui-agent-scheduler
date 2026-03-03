@@ -72,7 +72,13 @@ init_db()
 class Script(scripts.Script):
     def __init__(self):
         super().__init__()
-        script_callbacks.on_app_started(lambda block, _: self.on_app_started(block))
+        # Use on_before_launch (runs before server starts) so the Enqueue handler
+        # is included in the initial Gradio config served to browsers.
+        # Falls back to on_app_started for compatibility with other A1111 forks.
+        if hasattr(script_callbacks, 'on_before_launch'):
+            script_callbacks.on_before_launch(lambda block: self.on_app_started(block))
+        else:
+            script_callbacks.on_app_started(lambda block, _: self.on_app_started(block))
         self.checkpoint_override = checkpoint_current
         self.generate_button = None
         self.enqueue_row = None
@@ -145,34 +151,37 @@ class Script(scripts.Script):
     def bind_enqueue_button(self, root: gr.Blocks):
         generate = self.generate_button
         is_img2img = self.is_img2img
-        dependencies: List[dict] = [
-            x for x in root.dependencies if x["trigger"] == "click" and generate._id in x["targets"]
-        ]
 
-        dependency: dict = None
-        cnet_dependency: dict = None
+        dependency = None
+        cnet_dependency = None
         UiControlNetUnit = None
-        for d in dependencies:
-            if len(d["outputs"]) == 1:
-                outputs = get_components_by_ids(root, d["outputs"])
-                output = outputs[0]
+        for fn in root.fns.values():
+            if (generate._id, "click") not in fn.targets:
+                continue
+            if len(fn.outputs) == 1:
+                output = fn.outputs[0]
                 if isinstance(output, gr.State) and type(output.value).__name__ == "UiControlNetUnit":
-                    cnet_dependency = d
+                    cnet_dependency = fn
                     UiControlNetUnit = type(output.value)
+            elif len(fn.outputs) > 1:
+                if dependency is None or len(fn.outputs) > len(dependency.outputs):
+                    dependency = fn
 
-            elif len(d["outputs"]) == 4:
-                dependency = d
+        if dependency is None:
+            log.warning("[AgentScheduler] Could not find generate button click handler, Enqueue button will not work")
+            return
+
+        log.info(f"[AgentScheduler] Found generate handler with {len(dependency.outputs)} outputs, {len(dependency.inputs)} inputs")
 
         with root:
             if self.checkpoint_dropdown is not None:
                 self.checkpoint_dropdown.change(fn=self.on_checkpoint_changed, inputs=[self.checkpoint_dropdown])
 
-            fn_block = next(fn for fn in root.fns if compare_components_with_ids(fn.inputs, dependency["inputs"]))
-            fn = self.wrap_register_ui_task()
-            inputs = fn_block.inputs.copy()
+            wrapped_fn = self.wrap_register_ui_task()
+            inputs = dependency.inputs.copy()
             inputs.insert(0, self.checkpoint_dropdown)
             args = dict(
-                fn=fn,
+                fn=wrapped_fn,
                 _js="submit_enqueue_img2img" if is_img2img else "submit_enqueue",
                 inputs=inputs,
                 outputs=None,
@@ -182,13 +191,10 @@ class Script(scripts.Script):
             self.submit_button.click(**args)
 
             if cnet_dependency is not None:
-                cnet_fn_block = next(
-                    fn for fn in root.fns if compare_components_with_ids(fn.inputs, cnet_dependency["inputs"])
-                )
                 self.submit_button.click(
                     fn=UiControlNetUnit,
-                    inputs=cnet_fn_block.inputs,
-                    outputs=cnet_fn_block.outputs,
+                    inputs=cnet_dependency.inputs,
+                    outputs=cnet_dependency.outputs,
                     queue=False,
                 )
 
@@ -211,7 +217,7 @@ class Script(scripts.Script):
                     task_id = str(uuid4())
 
                 if checkpoint is None or checkpoint == "" or checkpoint == checkpoint_current:
-                    checkpoint = [shared.sd_model.sd_checkpoint_info.title]
+                    checkpoint = [getattr(getattr(shared.sd_model, 'sd_checkpoint_info', None), 'title', None)]
                 elif checkpoint == checkpoint_runtime:
                     checkpoint = [None]
                 elif checkpoint.endswith(" checkpoints)"):

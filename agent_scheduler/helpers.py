@@ -104,15 +104,11 @@ def get_components_by_ids(root: Block, ids: List[int]):
 def detect_control_net(root: gr.Blocks, submit: gr.Button):
     UiControlNetUnit = None
 
-    dependencies: List[dict] = [
-        x
-        for x in root.dependencies
-        if x["trigger"] == "click" and submit._id in x["targets"]
-    ]
-    for d in dependencies:
-        if len(d["outputs"]) == 1:
-            outputs = get_components_by_ids(root, d["outputs"])
-            output = outputs[0]
+    for fn in root.fns.values():
+        if (submit._id, "click") not in fn.targets:
+            continue
+        if len(fn.outputs) == 1:
+            output = fn.outputs[0]
             if (
                 isinstance(output, gr.State)
                 and type(output.value).__name__ == "UiControlNetUnit"
