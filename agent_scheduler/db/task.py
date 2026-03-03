@@ -18,6 +18,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Session
 
+from pydantic import Field as PydanticField
+
 from .base import BaseTableManager, Base
 from ..models import TaskModel
 
@@ -48,15 +50,12 @@ class TaskStatus(str, Enum):
 
 
 class Task(TaskModel):
-    script_params: bytes = None
+    script_params: bytes = PydanticField(default=None, exclude=True)
     params: str
 
     def __init__(self, **kwargs):
         priority = kwargs.pop("priority", int(datetime.now(timezone.utc).timestamp() * 1000))
         super().__init__(priority=priority, **kwargs)
-
-    class Config(TaskModel.__config__):
-        exclude = ["script_params"]
 
     @staticmethod
     def from_table(table: "TaskTable"):
