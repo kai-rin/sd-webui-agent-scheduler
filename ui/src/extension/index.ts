@@ -80,6 +80,73 @@ const historyStore = createHistoryTasksStore({
   tasks: [],
 });
 
+// Queue-based progress tracking for enqueued tasks.
+// Only one requestProgress() runs at a time to avoid duplicate progressDivs/livePreview.
+// When a task completes, the next queued task is automatically tracked.
+const enqueueQueue: Array<{ taskId: string; type: string }> = [];
+let enqueueTrackingActive = false;
+// Track task IDs enqueued from this browser so pendingStore.subscribe
+// skips showTaskProgress for them (avoids double requestProgress + submit() side effects).
+const enqueueTrackedIds = new Set<string>();
+
+function startEnqueueProgress(taskId: string, type: string) {
+  enqueueTrackedIds.add(taskId);
+  enqueueQueue.push({ taskId, type });
+  if (!enqueueTrackingActive) {
+    trackNextEnqueuedTask();
+  }
+}
+
+function trackNextEnqueuedTask() {
+  const next = enqueueQueue.shift();
+  if (!next) {
+    enqueueTrackingActive = false;
+    return;
+  }
+
+  enqueueTrackingActive = true;
+  const { taskId, type } = next;
+  const tabname = type === 'img2img' ? 'img2img' : 'txt2img';
+  const galleryContainer = gradioApp().querySelector<HTMLElement>(`#${tabname}_gallery_container`);
+  const gallery = gradioApp().querySelector<HTMLElement>(`#${tabname}_gallery`);
+  if (!galleryContainer || !gallery) {
+    trackNextEnqueuedTask();
+    return;
+  }
+
+  requestProgress(taskId, galleryContainer, gallery, () => {
+    enqueueTrackedIds.delete(taskId);
+    // After progress ends, fetch result images and display in gallery
+    fetch(`/agent-scheduler/v1/task/${taskId}/results`)
+      .then(r => r.json())
+      .then(data => {
+        // Only show enqueue result preview if no other requestProgress is
+        // currently active on this gallery (indicated by a .progressDiv sibling
+        // of galleryContainer).  If Generate is running, its own livePreview
+        // is already visible — adding an overlay would hide it.
+        const otherProgressActive = galleryContainer.parentNode?.querySelector('.progressDiv');
+        if (!otherProgressActive && data.success && data.data?.length) {
+          // Remove any previous enqueue result preview (use unique class to avoid
+          // colliding with requestProgress's own .livePreview management).
+          gallery.querySelector('.enqueueResultPreview')?.remove();
+
+          const resultPreview = document.createElement('div');
+          resultPreview.className = 'enqueueResultPreview livePreview';
+
+          for (const item of data.data) {
+            const img = new Image();
+            img.src = item.image.startsWith('data:') ? item.image : `data:image/png;base64,${item.image}`;
+            resultPreview.appendChild(img);
+          }
+
+          gallery.insertBefore(resultPreview, gallery.firstElementChild);
+        }
+        trackNextEnqueuedTask();
+      })
+      .catch(() => trackNextEnqueuedTask());
+  });
+}
+
 // load samplers and checkpoints
 const samplers: string[] = [];
 const checkpoints: string[] = ['System'];
@@ -293,7 +360,21 @@ async function notify(response: ResponseStatus) {
 }
 
 window.notify = notify;
-window.origRandomId = window.randomId;
+// Save original randomId before any monkey-patching.
+// Core JS files (javascript/*.js) load before extension JS, so randomId is defined.
+if (typeof window.randomId === 'function') {
+  window.origRandomId = window.randomId;
+} else {
+  // Fallback: defer until onUiLoaded if somehow not yet available
+  const _saveOrig = () => {
+    if (typeof window.randomId === 'function') {
+      window.origRandomId = window.randomId;
+    } else {
+      setTimeout(_saveOrig, 100);
+    }
+  };
+  _saveOrig();
+}
 
 function showTaskProgress(task_id: string, type: string | undefined, callback: () => void) {
   // delay progress request until the options loaded
@@ -368,15 +449,12 @@ function initQueueHandler() {
     res[1] = randomId();
     window.randomId = window.origRandomId;
 
+    startEnqueueProgress(res[1], 'txt2img');
+
     if (btnEnqueue != null) {
       btnEnqueue.innerText = 'Queued';
       setTimeout(() => {
         btnEnqueue.innerText = 'Enqueue';
-        if (!sharedStore.getState().uiAsTab) {
-          if (sharedStore.getState().selectedTab === 'pending') {
-            pendingStore.refresh();
-          }
-        }
       }, 1000);
     }
 
@@ -391,15 +469,12 @@ function initQueueHandler() {
     res[2] = get_tab_index('mode_img2img');
     window.randomId = window.origRandomId;
 
+    startEnqueueProgress(res[1], 'img2img');
+
     if (btnImg2ImgEnqueue != null) {
       btnImg2ImgEnqueue.innerText = 'Queued';
       setTimeout(() => {
         btnImg2ImgEnqueue.innerText = 'Enqueue';
-        if (!sharedStore.getState().uiAsTab) {
-          if (sharedStore.getState().selectedTab === 'pending') {
-            pendingStore.refresh();
-          }
-        }
       }, 1000);
     }
 
@@ -455,8 +530,16 @@ function initQueueHandler() {
   pendingStore.subscribe((curr, prev) => {
     const id = curr.current_task_id;
     if (id !== prev.current_task_id && id != null) {
+      // Skip tasks already tracked by startEnqueueProgress to avoid
+      // double requestProgress and submit() side effects on the gallery.
+      if (enqueueTrackedIds.has(id)) return;
+      // Only act on tasks that are actually in the pending queue (agent-scheduler tasks).
+      // Normal Generate tasks also set progress.current_task but are not in pending_tasks.
+      // Calling showTaskProgress for them would monkey-patch randomId and call submit()
+      // with side effects (hiding buttons, setting localStorage) that break the Generate flow.
       const task = curr.pending_tasks.find(t => t.id === id);
-      showTaskProgress(id, task?.type, pendingStore.refresh);
+      if (!task) return;
+      showTaskProgress(id, task.type, pendingStore.refresh);
     }
   });
 

@@ -7,7 +7,8 @@
     "build": "tsc && yarn build:extension",
     "build:extension": "vite build --config vite.extension.ts",
     "lint": "eslint src --ext ts,tsx --fix --report-unused-disable-directives --max-warnings 0",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "npx playwright test"
   },
   "dependencies": {
     "ag-grid-community": "^31.1.1",
@@ -17,6 +18,7 @@
     "zustand": "^4.5.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
     "@types/node": "^20.11.19",
     "@types/react": "^18.2.57",
     "@types/react-dom": "^18.2.19",
