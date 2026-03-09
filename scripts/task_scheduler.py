@@ -198,6 +198,16 @@ class Script(scripts.Script):
                     queue=False,
                 )
 
+            # Hidden trigger to populate the main gallery after Enqueue completes
+            id_part = "img2img" if is_img2img else "txt2img"
+            result_task_id = gr.Textbox(visible=False, elem_id=f"{id_part}_enqueue_result_task_id")
+            result_trigger = gr.Button(visible=False, elem_id=f"{id_part}_enqueue_result_trigger")
+            result_trigger.click(
+                fn=load_enqueue_result,
+                inputs=[result_task_id],
+                outputs=dependency.outputs,
+            )
+
     def wrap_register_ui_task(self):
         def f(request: gr.Request, *args):
             if len(args) == 0:
@@ -316,6 +326,33 @@ def infotexts_to_geninfo(infotexts: List[str]):
         all_seeds.append(params.get("Seed", "-1"))
 
     return geninfo
+
+
+def load_enqueue_result(task_id: str):
+    """Load completed Enqueue task results for the main Gradio gallery."""
+    task = task_manager.get_task(task_id)
+    if not task or task.status != TaskStatus.DONE or not task.result:
+        return [gr.update()] * 5
+
+    try:
+        result: dict = json.loads(task.result)
+        images = result.get("images", [])
+        geninfo = result.get("geninfo", {})
+
+        gallery_images = [Image.open(i) for i in images if os.path.exists(i)]
+        infotexts = geninfo.get("infotexts", []) if isinstance(geninfo, dict) else []
+        infotext = infotexts[0] if infotexts else ""
+
+        return (
+            gr.update(value=gallery_images, visible=True),
+            gr.update(),
+            json.dumps(geninfo) if geninfo else "",
+            f"<p>{infotext}</p>" if infotext else "",
+            "",
+        )
+    except Exception as e:
+        log.error(f"[AgentScheduler] Failed to load enqueue result: {e}")
+        return [gr.update()] * 5
 
 
 def get_task_results(task_id: str, image_idx: int = None):
