@@ -1,6 +1,7 @@
 import os
 import ctypes
 import json
+import shutil
 import subprocess
 import time
 import traceback
@@ -347,12 +348,20 @@ class TaskRunner:
 
                 # enable image saving
                 samples_save = shared.opts.samples_save
+                grid_save = shared.opts.grid_save
                 shared.opts.samples_save = True
+                shared.opts.grid_save = True
 
                 res = self.__execute_task(task_id, is_img2img, task_args)
 
-                # disable image saving
+                # restore image saving settings
                 shared.opts.samples_save = samples_save
+                shared.opts.grid_save = grid_save
+
+                # If grid_save was originally disabled, relocate grid files
+                # from output/ to extension cache (user doesn't want grids in output/)
+                if not grid_save:
+                    self.__relocate_grids_to_cache()
 
                 if not res or isinstance(res, Exception):
                     if isinstance(res, OutOfMemoryError):
@@ -537,7 +546,26 @@ class TaskRunner:
             self.__saved_images_path.insert(0, data.filename)
         else:
             self.__saved_images_path.append(data.filename)
-    
+
+    def __relocate_grids_to_cache(self):
+        """Move grid files from output/ to extension cache when grid_save is disabled."""
+        outpath_grids = shared.opts.outdir_grids or shared.opts.outdir_txt2img_grids
+        if not outpath_grids:
+            return
+
+        ext_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        cache_dir = os.path.join(ext_dir, "cache", "grids")
+        os.makedirs(cache_dir, exist_ok=True)
+
+        for i, path in enumerate(self.__saved_images_path):
+            if path.startswith(outpath_grids):
+                try:
+                    new_path = os.path.join(cache_dir, os.path.basename(path))
+                    shutil.move(path, new_path)
+                    self.__saved_images_path[i] = new_path
+                except Exception as e:
+                    log.warning(f"[AgentScheduler] Failed to relocate grid: {e}")
+
     def __on_completed(self):
         action = getattr(shared.opts, "queue_completion_action", "Do nothing")
 
