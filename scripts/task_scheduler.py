@@ -175,7 +175,7 @@ class Script(scripts.Script):
 
         with root:
             if self.checkpoint_dropdown is not None:
-                self.checkpoint_dropdown.change(fn=self.on_checkpoint_changed, inputs=[self.checkpoint_dropdown])
+                self.checkpoint_dropdown.change(fn=self.on_checkpoint_changed, inputs=[self.checkpoint_dropdown], queue=False)
 
             wrapped_fn = self.wrap_register_ui_task()
             inputs = dependency.inputs.copy()
@@ -186,6 +186,7 @@ class Script(scripts.Script):
                 inputs=inputs,
                 outputs=None,
                 show_progress=False,
+                queue=False,
             )
 
             self.submit_button.click(**args)
@@ -206,6 +207,7 @@ class Script(scripts.Script):
                 fn=load_enqueue_result,
                 inputs=[result_task_id],
                 outputs=dependency.outputs,
+                queue=False,
             )
 
     def wrap_register_ui_task(self):
@@ -588,10 +590,14 @@ def on_ui_tab(**_kwargs):
                             )
 
         # register event handlers
+        # Use queue=False on all handlers — none require GPU work, and direct
+        # HTTP POST (/run/predict) is resilient to SSE being blocked by browser
+        # extensions (AdGuard, VPN, etc.) that interfere with Gradio's /queue/data stream.
         status.change(
             fn=lambda x: None,
             _js="agent_scheduler_status_filter_changed",
             inputs=[status],
+            queue=False,
         )
         save.click(
             fn=lambda x, y, z: call_queue.wrap_gradio_call(save_files)(x, y, False, int(z)),
@@ -599,6 +605,7 @@ def on_ui_tab(**_kwargs):
             inputs=[generation_info, galerry, infotext],
             outputs=[download_files, html_log],
             show_progress=False,
+            queue=False,
         )
         if save_zip:
             save_zip.click(
@@ -606,16 +613,19 @@ def on_ui_tab(**_kwargs):
                 _js="(x, y, z) => [x, y, selected_gallery_index()]",
                 inputs=[generation_info, galerry, infotext],
                 outputs=[download_files, html_log],
+                queue=False,
             )
         selected_task.change(
             fn=lambda x: get_task_results(x, None),
             inputs=[selected_task],
             outputs=[infotext, result_actions, galerry, generation_info, download_files, html_log],
+            queue=False,
         )
         selected_image_id.change(
             fn=lambda x, y: get_task_results(x, image_idx=int(y)),
             inputs=[selected_task, selected_image_id],
             outputs=[infotext, result_actions],
+            queue=False,
         )
         try:
             for paste_tabname, paste_button in send_to_buttons.items():
@@ -764,16 +774,19 @@ def on_ui_settings():
             fn=enqueue_keyboard_shortcut,
             inputs=[disable, modifiers, key_code],
             outputs=[shortcut, modifiers, key_code],
+            queue=False,
         )
         key_code.change(
             fn=enqueue_keyboard_shortcut,
             inputs=[disable, modifiers, key_code],
             outputs=[shortcut, modifiers, key_code],
+            queue=False,
         )
         disable.change(
             fn=enqueue_keyboard_shortcut,
             inputs=[disable, modifiers, key_code],
             outputs=[shortcut, modifiers, key_code],
+            queue=False,
         )
 
         return shortcut
