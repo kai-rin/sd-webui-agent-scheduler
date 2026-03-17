@@ -1,7 +1,6 @@
 import os
 import ctypes
 import json
-import shutil
 import subprocess
 import time
 import traceback
@@ -346,22 +345,15 @@ class TaskRunner:
                 self.__saved_images_path = []
                 self.__run_callbacks("task_started", task_id, **task_meta)
 
-                # enable image saving
+                # enable sample saving (needed for task history image paths)
+                # respect user's grid_save setting to avoid conflicts with other extensions
                 samples_save = shared.opts.samples_save
-                grid_save = shared.opts.grid_save
                 shared.opts.samples_save = True
-                shared.opts.grid_save = True
 
-                res = self.__execute_task(task_id, is_img2img, task_args)
-
-                # restore image saving settings
-                shared.opts.samples_save = samples_save
-                shared.opts.grid_save = grid_save
-
-                # If grid_save was originally disabled, relocate grid files
-                # from output/ to extension cache (user doesn't want grids in output/)
-                if not grid_save:
-                    self.__relocate_grids_to_cache()
+                try:
+                    res = self.__execute_task(task_id, is_img2img, task_args)
+                finally:
+                    shared.opts.samples_save = samples_save
 
                 if not res or isinstance(res, Exception):
                     if isinstance(res, OutOfMemoryError):
@@ -474,6 +466,7 @@ class TaskRunner:
                     res = OutOfMemoryError()
                 else:
                     res = result[1]
+                    self.__cache_gallery_grid(result[0])
             except Exception as e:
                 res = e
             finally:
@@ -482,6 +475,44 @@ class TaskRunner:
             shared.state.end()
 
             return res
+
+    def __cache_gallery_grid(self, gallery_update):
+        """Cache grid image from gallery result when grid is returned but not saved to disk.
+
+        When return_grid=True but grid_save=False, the grid exists only in the gallery
+        (PIL Image) and is never written to disk via save_image(). This method saves it
+        directly to the extension cache so it appears in task history without triggering
+        image_saved callbacks (which would cause conflicts with extensions like Eagle).
+        """
+        if not getattr(shared.opts, "return_grid", False) or getattr(shared.opts, "grid_save", True):
+            return
+
+        if len(self.__saved_images_path) < 2 and getattr(shared.opts, "grid_only_if_multiple", True):
+            return
+
+        images = None
+        if isinstance(gallery_update, dict):
+            images = gallery_update.get("value")
+        elif isinstance(gallery_update, (list, tuple)):
+            images = gallery_update
+
+        if not images or len(images) <= len(self.__saved_images_path):
+            return
+
+        grid_image = images[0]
+        if not hasattr(grid_image, "save"):
+            return
+
+        ext_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        cache_dir = os.path.join(ext_dir, "cache", "grids")
+        os.makedirs(cache_dir, exist_ok=True)
+
+        grid_path = os.path.join(cache_dir, f"grid-{int(time.time() * 1000)}.webp")
+        try:
+            grid_image.save(grid_path, quality=95)
+            self.__saved_images_path.insert(0, grid_path)
+        except Exception as e:
+            log.warning(f"[AgentScheduler] Failed to cache grid image: {e}")
 
     def __execute_api_task(self, task_id: str, is_img2img: bool, **kwargs):
         progress.start_task(task_id)
@@ -546,25 +577,6 @@ class TaskRunner:
             self.__saved_images_path.insert(0, data.filename)
         else:
             self.__saved_images_path.append(data.filename)
-
-    def __relocate_grids_to_cache(self):
-        """Move grid files from output/ to extension cache when grid_save is disabled."""
-        outpath_grids = shared.opts.outdir_grids or shared.opts.outdir_txt2img_grids
-        if not outpath_grids:
-            return
-
-        ext_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        cache_dir = os.path.join(ext_dir, "cache", "grids")
-        os.makedirs(cache_dir, exist_ok=True)
-
-        for i, path in enumerate(self.__saved_images_path):
-            if path.startswith(outpath_grids):
-                try:
-                    new_path = os.path.join(cache_dir, os.path.basename(path))
-                    shutil.move(path, new_path)
-                    self.__saved_images_path[i] = new_path
-                except Exception as e:
-                    log.warning(f"[AgentScheduler] Failed to relocate grid: {e}")
 
     def __on_completed(self):
         action = getattr(shared.opts, "queue_completion_action", "Do nothing")
